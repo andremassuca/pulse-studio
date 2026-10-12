@@ -60,17 +60,22 @@ class SerialSource:
     def _run(self, ser: serial.Serial) -> None:
         parser = LineParser()
         buffer = b""
-        got_samples = False
-        # The Uno resets when the port opens. Once it is up, ask for the
-        # compact format, in case it was left in Serial Plotter mode. Keep
-        # asking until samples arrive.
-        next_ask = time.monotonic() + 1.8
+        opened = time.monotonic()
+        # The banner tells which scale the values use (plain counts or the sum
+        # of 16 readings), so nothing is accepted before it. Opening the port
+        # usually resets the Uno and the banner comes by itself after about two
+        # seconds. If it does not, or the board was left in Serial Plotter
+        # mode, ask for it: the C command prints it and selects the compact
+        # format. A board that never sends one is taken to be the old
+        # firmware after a few seconds.
+        next_ask = opened + 0.4
         try:
             ser.reset_input_buffer()
             while not self._stop.is_set():
-                if not got_samples and time.monotonic() >= next_ask:
+                now = time.monotonic()
+                if parser.firmware_version is None and now >= next_ask:
                     ser.write(b"C")
-                    next_ask += 1.0
+                    next_ask = now + 1.0
                 chunk = ser.read(max(1, ser.in_waiting))
                 if not chunk:
                     continue
@@ -82,8 +87,8 @@ class SerialSource:
                     if sample is not None:
                         batch.append(sample)
                 self.firmware_version = parser.firmware_version
-                if batch:
-                    got_samples = True
+                ready = parser.firmware_version is not None or time.monotonic() - opened > 4.0
+                if batch and ready:
                     with self._lock:
                         self._samples.extend(batch)
         except (serial.SerialException, OSError) as exc:

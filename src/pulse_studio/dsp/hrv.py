@@ -13,6 +13,9 @@ class Hrv:
     rmssd_ms: float
     mean_ibi_ms: float
     count: int
+    pnn50: float  # percent of successive differences above 50 ms
+    sd1_ms: float  # Poincare short axis (beat to beat variability)
+    sd2_ms: float  # Poincare long axis (slower variability)
 
 
 def correct_artifacts(ibis_ms: list[float], consecutive: list[bool], tolerance: float = 0.25):
@@ -53,9 +56,16 @@ def compute_hrv(
     diffs = [ibi[i] - ibi[i - 1] for i in range(1, len(ibi)) if consecutive[i]]
     if len(diffs) < min_intervals - 2:
         return None
+    sdnn = float(np.std(ibi, ddof=1))
+    rmssd = float(np.sqrt(np.mean(np.square(diffs))))
+    sd1 = rmssd / np.sqrt(2.0)
+    sd2 = float(np.sqrt(max(0.0, 2.0 * sdnn**2 - sd1**2)))
     return Hrv(
-        sdnn_ms=float(np.std(ibi, ddof=1)),
-        rmssd_ms=float(np.sqrt(np.mean(np.square(diffs)))),
+        sdnn_ms=sdnn,
+        rmssd_ms=rmssd,
         mean_ibi_ms=float(np.mean(ibi)),
         count=len(ibi),
+        pnn50=float(100.0 * np.mean(np.abs(diffs) > 50.0)),
+        sd1_ms=float(sd1),
+        sd2_ms=sd2,
     )

@@ -1,23 +1,28 @@
-"""The main window."""
+"""The main window: sidebar, header, device controls and the pages."""
 
+import re
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .. import __version__
 from ..acquisition import (
     ReplaySource,
     SerialSource,
@@ -25,36 +30,30 @@ from ..acquisition import (
     list_serial_ports,
     pick_default,
 )
+from ..recording import default_folder, list_sessions
 from ..resources import sample_recording
-from ..dsp import SignalState
-from ..recording import default_folder
 from ..session import Session
-from .heart import HeartWidget
-from .plots import TachoPlot, WavePlot
+from . import icons
+from .branding import icon_pixmap
+from .pages import DashboardPage, LivePage, SessionsPage, SettingsPage
 from .theme import THEMES, stylesheet
-from .widgets import Card, Chip, StatCard
+from .widgets import StatusLine
 
 DEMO_KEY = "demo"
 SAMPLE_KEY = "sample"
-DISPLAY_DELAY_S = 0.28  # must be larger than the peak detection latency
+DISPLAY_DELAY_S = 0.30  # must be larger than the peak detection latency
 SCENARIOS = [
     ("Good signal", "finger"),
     ("No finger", "no_finger"),
     ("Movement", "motion"),
     ("Too much pressure", "saturated"),
 ]
-STATE_TEXT = {
-    SignalState.WARMING_UP: ("Warming up", "idle"),
-    SignalState.NO_FINGER: ("No finger detected", "bad"),
-    SignalState.MOTION: ("Movement detected", "warn"),
-    SignalState.SATURATED: ("Sensor saturated, ease the pressure", "bad"),
-    SignalState.POOR: ("Weak signal", "warn"),
-    SignalState.GOOD: ("Good signal", "good"),
-}
-DISCLAIMER = (
-    "PPG measures blood volume changes optically, not the electrical activity of the heart. "
-    "The heart animation is illustrative. Pulse Studio is not a medical device."
-)
+PAGES = [
+    ("Dashboard", icons.home, "Pulse Studio", "Monitor your heart rate in real time with an optical pulse sensor."),
+    ("Live Signal", icons.pulse, "Live Signal", "The filtered pulse wave beat by beat, with its variability."),
+    ("Sessions", icons.stack, "Sessions", "Recordings you made, ready to replay."),
+    ("Settings", icons.gear, "Settings", "Appearance, recordings and startup."),
+]
 
 
 class PlayClock:
@@ -84,22 +83,36 @@ class PlayClock:
         return self.head
 
 
+@dataclass
+class Ctx:
+    session: Session
+    c: dict
+    connected: bool
+    head: float
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: QSettings):
         super().__init__()
         self.settings = settings
         self.session = Session()
         self.clock = PlayClock()
+        self.paused = False
         self._pending = []  # beats waiting for the play head
-        self._theme = "dark" if settings.value("theme", "light") == "dark" else "light"
+        self._head = 0.0
+        self._theme = "light" if settings.value("theme", "light") == "light" else "dark"
         self.setWindowTitle("Pulse Studio")
-        self.resize(1240, 900)
-        self.setMinimumSize(1020, 780)
+        self.resize(1440, 900)
+        self.setMinimumSize(1240, 800)
 
         self._build()
         self._refresh_ports(initial=True)
         self._apply_theme()
-        self._set_span(int(settings.value("span", 10)))
+        self.set_span(int(settings.value("span", 10)), save=False)
+        self.set_mode(self._saved_mode(), save=False)
+        self.settings_page.load(self._theme, self._mode, self.recordings_folder(),
+                                str(settings.value("autoconnect", "false")).lower() == "true")
+        self._go(0)
 
         self._timer = QTimer(self)
         self._timer.setInterval(16)
@@ -107,207 +120,199 @@ class MainWindow(QMainWindow):
         self._timer.start()
         self._slow = QTimer(self)
         self._slow.setInterval(100)
-        self._slow.timeout.connect(self._update_cards)
+        self._slow.timeout.connect(self._refresh)
         self._slow.start()
-        self._rec_timer = QTimer(self)
-        self._rec_timer.setInterval(500)
-        self._rec_timer.timeout.connect(self._update_record_button)
 
-    # ---- layout ---------------------------------------------------------
+    # ---- construction ----------------------------------------------------
 
     def _build(self) -> None:
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
-        main = QVBoxLayout(root)
-        main.setContentsMargins(24, 18, 24, 14)
-        main.setSpacing(14)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._build_sidebar())
 
-        # Top bar
-        top = QHBoxLayout()
-        top.setSpacing(10)
-        title = QLabel("Pulse Studio")
-        title.setObjectName("title")
-        top.addWidget(title)
-        top.addStretch(1)
+        content = QVBoxLayout()
+        content.setContentsMargins(30, 22, 30, 12)
+        content.setSpacing(14)
+        content.addLayout(self._build_header())
+        self.stack = QStackedWidget()
+        self.dashboard = DashboardPage(self)
+        self.live = LivePage(self)
+        self.sessions_page = SessionsPage(self)
+        self.settings_page = SettingsPage(self)
+        self.pages = [self.dashboard, self.live, self.sessions_page, self.settings_page]
+        for page in self.pages:
+            self.stack.addWidget(page)
+        content.addWidget(self.stack, 1)
+        self.notice = QPushButton("")
+        self.notice.setObjectName("link")
+        self.notice.hide()
+        self.notice.clicked.connect(self.open_recordings)
+        content.addWidget(self.notice, 0, Qt.AlignmentFlag.AlignLeft)
+        outer.addLayout(content, 1)
+
+        self.heart = self.dashboard.heart
+
+    def _build_sidebar(self) -> QWidget:
+        side = QFrame()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(236)
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(18, 22, 18, 18)
+        lay.setSpacing(6)
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(icon_pixmap(64).scaled(34, 34, Qt.AspectRatioMode.KeepAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation))
+        brand.addWidget(logo)
+        name = QLabel("Pulse Studio")
+        name.setObjectName("appName")
+        brand.addWidget(name)
+        brand.addStretch(1)
+        lay.addLayout(brand)
+        lay.addSpacing(26)
+        self.nav_group = QButtonGroup(self)
+        self.nav_buttons = []
+        for i, (label, _icon, _t, _s) in enumerate(PAGES):
+            b = QPushButton("  " + label)
+            b.setObjectName("nav")
+            b.setCheckable(True)
+            b.setIconSize(b.iconSize() * 1.0)
+            b.clicked.connect(lambda _=False, k=i: self._go(k))
+            self.nav_group.addButton(b)
+            self.nav_buttons.append(b)
+            lay.addWidget(b)
+        lay.addStretch(1)
+        self.side_note = QLabel(f"Pulse Studio v{__version__}\nPPG · Arduino Uno\nXD-58C sensor")
+        self.side_note.setObjectName("note")
+        lay.addWidget(self.side_note)
+        return side
+
+    def _build_header(self) -> QHBoxLayout:
+        header = QHBoxLayout()
+        header.setSpacing(20)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.page_title = QLabel("Pulse Studio")
+        self.page_title.setObjectName("pageTitle")
+        titles.addWidget(self.page_title)
+        self.page_sub = QLabel("")
+        self.page_sub.setObjectName("sub")
+        titles.addWidget(self.page_sub)
+        header.addLayout(titles, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        status = QHBoxLayout()
+        status.setSpacing(16)
+        status.addStretch(1)
+        self.status_line = StatusLine()
+        status.addWidget(self.status_line)
+        self.device_label = QLabel("")
+        self.device_label.setObjectName("sub")
+        status.addWidget(self.device_label)
+        self.rate_label = QLabel("Sampling 500 Hz")
+        self.rate_label.setObjectName("sub")
+        status.addWidget(self.rate_label)
+        right.addLayout(status)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addStretch(1)
         self.scenario = QComboBox()
-        self.scenario.setMinimumWidth(160)
-        self.scenario.setToolTip("Simulated signal to try the detection of bad cases")
+        self.scenario.setMinimumWidth(150)
+        self.scenario.setToolTip("Simulated signal, to see how bad signals are detected")
         for label, key in SCENARIOS:
             self.scenario.addItem(label, key)
         self.scenario.currentIndexChanged.connect(self._scenario_changed)
         self.scenario.hide()
-        top.addWidget(self.scenario)
+        controls.addWidget(self.scenario)
         self.port_box = QComboBox()
         self.port_box.currentIndexChanged.connect(self._port_changed)
-        top.addWidget(self.port_box)
+        controls.addWidget(self.port_box)
         self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setObjectName("icon")
+        self.refresh_btn.setObjectName("outline")
         self.refresh_btn.clicked.connect(lambda: self._refresh_ports())
-        top.addWidget(self.refresh_btn)
+        controls.addWidget(self.refresh_btn)
         self.connect_btn = QPushButton("Connect")
         self.connect_btn.setObjectName("primary")
         self.connect_btn.setMinimumWidth(110)
-        self.connect_btn.clicked.connect(self._toggle_connection)
-        top.addWidget(self.connect_btn)
-        self.record_btn = QPushButton("Record")
-        self.record_btn.setMinimumWidth(130)
-        self.record_btn.setEnabled(False)
-        self.record_btn.clicked.connect(self._toggle_recording)
-        top.addWidget(self.record_btn)
-        self.theme_btn = QPushButton()
-        self.theme_btn.setObjectName("icon")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        top.addWidget(self.theme_btn)
-        main.addLayout(top)
+        self.connect_btn.clicked.connect(self.toggle_connection)
+        controls.addWidget(self.connect_btn)
+        right.addLayout(controls)
+        header.addLayout(right)
+        return header
 
-        # Hero row
-        hero = QHBoxLayout()
-        hero.setSpacing(14)
-        self.hero_card = Card()
-        hl = QHBoxLayout()
-        hl.setSpacing(8)
-        self.heart = HeartWidget()
-        hl.addWidget(self.heart, 5)
-        bpm_col = QVBoxLayout()
-        bpm_col.addStretch(1)
-        self.bpm_label = QLabel("--")
-        self.bpm_label.setObjectName("bpm")
-        bpm_col.addWidget(self.bpm_label)
-        unit = QLabel("BPM")
-        unit.setObjectName("bpmUnit")
-        bpm_col.addWidget(unit)
-        self.status_chip = Chip()
-        bpm_col.addSpacing(6)
-        bpm_col.addWidget(self.status_chip, 0, Qt.AlignmentFlag.AlignLeft)
-        bpm_col.addStretch(1)
-        hl.addLayout(bpm_col, 6)
-        self.hero_card.layout_.addLayout(hl)
-        self.hero_card.setFixedHeight(236)
-        hero.addWidget(self.hero_card, 5)
+    # ---- navigation and theme -------------------------------------------
 
-        cards = QVBoxLayout()
-        cards.setSpacing(14)
-        self.ibi_card = StatCard("Interval", "ms")
-        self.amp_card = StatCard("Amplitude", "counts")
-        self.quality_card = StatCard("Signal quality", "%")
-        small = QHBoxLayout()
-        small.setSpacing(14)
-        small.addWidget(self.ibi_card)
-        small.addWidget(self.amp_card)
-        for card in (self.ibi_card, self.amp_card, self.quality_card):
-            card.setFixedHeight(111)
-        cards.addLayout(small, 1)
-        cards.addWidget(self.quality_card, 1)
-        hero.addLayout(cards, 4)
-        main.addLayout(hero, 0)
-
-        # Waveform
-        wave_card = Card("Live PPG")
-        head = QHBoxLayout()
-        head.addStretch(1)
-        self.seg_group = QButtonGroup(self)
-        self.seg_buttons = {}
-        for secs in (5, 10, 30):
-            b = QPushButton(f"{secs} s")
-            b.setObjectName("seg")
-            b.setCheckable(True)
-            b.clicked.connect(lambda _=False, s=secs: self._set_span(s))
-            self.seg_group.addButton(b)
-            self.seg_buttons[secs] = b
-            head.addWidget(b)
-        wave_card.layout_.itemAt(0).widget().setParent(None)
-        header = QHBoxLayout()
-        header.addWidget(self.hero_title("Live PPG"))
-        header.addLayout(head)
-        wave_card.layout_.addLayout(header)
-        self.wave = WavePlot()
-        wave_card.layout_.addWidget(self.wave, 1)
-        wave_card.setMinimumHeight(250)
-        main.addWidget(wave_card, 1)
-
-        # Variability
-        lower = QHBoxLayout()
-        lower.setSpacing(14)
-        tacho_card = Card("Tachogram (beat to beat interval, ms)")
-        self.tacho = TachoPlot()
-        tacho_card.layout_.addWidget(self.tacho, 1)
-        tacho_card.setFixedHeight(206)
-        lower.addWidget(tacho_card, 3)
-        hrv_card = Card("Variability")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(2)
-        self.sdnn = self._hrv_value(grid, 0, "SDNN", "ms")
-        self.rmssd = self._hrv_value(grid, 1, "RMSSD", "ms")
-        self.beats_label = self._hrv_value(grid, 2, "Beats", "")
-        hrv_card.layout_.addLayout(grid)
-        self.hrv_hint = QLabel("")
-        self.hrv_hint.setObjectName("hint")
-        self.hrv_hint.setWordWrap(True)
-        hrv_card.layout_.addWidget(self.hrv_hint)
-        hrv_card.layout_.addStretch(1)
-        hrv_card.setFixedHeight(206)
-        lower.addWidget(hrv_card, 2)
-        main.addLayout(lower, 0)
-
-        # Footer
-        foot = QHBoxLayout()
-        note = QLabel(DISCLAIMER)
-        note.setObjectName("note")
-        note.setWordWrap(True)
-        foot.addWidget(note, 1)
-        self.record_info = QPushButton("")
-        self.record_info.setObjectName("seg")
-        self.record_info.clicked.connect(self._open_recordings)
-        self.record_info.hide()
-        foot.addWidget(self.record_info)
-        main.addLayout(foot)
-
-    def hero_title(self, text: str) -> QLabel:
-        lab = QLabel(text.upper())
-        lab.setObjectName("cardTitle")
-        return lab
-
-    def _hrv_value(self, grid: QGridLayout, r: int, name: str, unit: str) -> QLabel:
-        lab = QLabel(name)
-        lab.setObjectName("cardTitle")
-        val = QLabel("--")
-        val.setObjectName("cardValue")
-        val.setFont(self._small_value_font())
-        grid.addWidget(lab, r, 0)
-        grid.addWidget(val, r, 1, Qt.AlignmentFlag.AlignRight)
-        grid.addWidget(QLabel(unit), r, 2)
-        return val
-
-    def _small_value_font(self) -> QFont:
-        f = QFont("Segoe UI Variable Display", 18)
-        f.setWeight(QFont.Weight.DemiBold)
-        return f
-
-    # ---- theme and settings ---------------------------------------------
+    def _go(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.nav_buttons[index].setChecked(True)
+        _label, _icon, title, sub = PAGES[index]
+        self.page_title.setText(title)
+        self.page_sub.setText(sub)
+        if self.pages[index] is self.sessions_page:
+            self.sessions_page.reload()
 
     def _apply_theme(self) -> None:
         c = THEMES[self._theme]
         self.setStyleSheet(stylesheet(c))
-        self.wave.apply_theme(c)
-        self.tacho.apply_theme(c)
-        self.heart.set_colors("#FF7A8E" if self._theme == "dark" else "#FF6B81",
-                              c["accent_dark"], c["idle"], c["accent"])
-        self.theme_btn.setText("Light" if self._theme == "dark" else "Dark")
-        self._update_cards()
+        for page in self.pages:
+            page.apply_theme(c)
+        for b, (_l, icon, _t, _s) in zip(self.nav_buttons, PAGES):
+            b.setIcon(icon(c["text"]))
+        self._refresh()
 
-    def _toggle_theme(self) -> None:
-        self._theme = "light" if self._theme == "dark" else "dark"
+    def set_theme(self, name: str) -> None:
+        self._theme = name if name in THEMES else "light"
         self.settings.setValue("theme", self._theme)
+        box = self.settings_page.theme_box
+        box.blockSignals(True)
+        box.setCurrentIndex(max(0, box.findData(self._theme)))
+        box.blockSignals(False)
+        if not self.settings.contains("mode"):
+            self.set_mode(self._saved_mode(), save=False)
         self._apply_theme()
 
-    def _set_span(self, seconds: int) -> None:
-        if seconds not in self.seg_buttons:
+    def _saved_mode(self) -> str:
+        saved = self.settings.value("mode")
+        if saved in ("scroll", "sweep"):
+            return str(saved)
+        return "scroll" if self._theme == "light" else "sweep"
+
+    def set_span(self, seconds: int, save: bool = True) -> None:
+        if seconds not in (5, 10, 30):
             seconds = 10
-        self.seg_buttons[seconds].setChecked(True)
-        self.wave.set_span(float(seconds))
-        self.settings.setValue("span", seconds)
+        for page in (self.dashboard, self.live):
+            page.controls.span_buttons[seconds].setChecked(True)
+            page.wave.set_span(float(seconds))
+        if save:
+            self.settings.setValue("span", seconds)
+
+    def set_mode(self, mode: str, save: bool = True) -> None:
+        self._mode = mode if mode in ("scroll", "sweep") else "scroll"
+        for page in (self.dashboard, self.live):
+            page.wave.set_mode(self._mode)
+        for key, b in self.live.controls.mode_buttons.items():
+            b.setChecked(key == self._mode)
+        if hasattr(self, "settings_page"):
+            box = self.settings_page.mode_box
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(self._mode)))
+            box.blockSignals(False)
+        if save:
+            self.settings.setValue("mode", self._mode)
+
+    def toggle_pause(self) -> None:
+        self.paused = not self.paused
+        if not self.paused:
+            self.clock.reset()
+            self._pending.clear()
+        self._refresh()
 
     # ---- connection ------------------------------------------------------
 
@@ -332,13 +337,22 @@ class MainWindow(QMainWindow):
             self.port_box.setCurrentIndex(self.port_box.findData(choice.device))
         self.port_box.blockSignals(False)
         self._port_changed()
+        self._has_arduino = any(p.is_arduino or p.is_clone for p in ports)
 
     def _port_changed(self) -> None:
         self.scenario.setVisible(self.port_box.currentData() == DEMO_KEY)
 
-    def _toggle_connection(self) -> None:
+    def _repolish(self, widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _notify(self, text: str) -> None:
+        self.notice.setText(text)
+        self.notice.setVisible(bool(text))
+
+    def toggle_connection(self) -> None:
         if self.session.active:
-            self._disconnect()
+            self.disconnect_source()
             return
         key = self.port_box.currentData()
         try:
@@ -349,37 +363,48 @@ class MainWindow(QMainWindow):
                 source = ReplaySource(sample_recording())
             else:
                 source = SerialSource(key, self.port_box.currentText())
-            self.session.start(source)
+            self._start(source)
         except RuntimeError as exc:
-            self.record_info.setText(str(exc))
-            self.record_info.show()
-            self.record_info.setToolTip(str(exc))
+            self._notify(str(exc))
             return
         self.settings.setValue("port", key)
-        self.record_info.hide()
+
+    def _start(self, source) -> None:
+        self.session.start(source)
+        self._notify("")
         self.clock.reset()
         self._pending.clear()
+        self.paused = False
+        for page in (self.dashboard, self.live):
+            page.wave.clear_view()
         self.connect_btn.setText("Disconnect")
-        self.connect_btn.setObjectName("")
-        self.connect_btn.setStyleSheet(self.connect_btn.styleSheet())
-        self.connect_btn.style().unpolish(self.connect_btn)
-        self.connect_btn.style().polish(self.connect_btn)
-        self.record_btn.setEnabled(True)
+        self.connect_btn.setObjectName("outline")
+        self._repolish(self.connect_btn)
         self.port_box.setEnabled(False)
         self.refresh_btn.setEnabled(False)
 
-    def _disconnect(self) -> None:
+    def disconnect_source(self) -> None:
         if self.session.recorder is not None:
-            self._toggle_recording()
+            self.toggle_recording()
         self.session.stop()
+        self.paused = False
         self.connect_btn.setText("Connect")
         self.connect_btn.setObjectName("primary")
-        self.connect_btn.style().unpolish(self.connect_btn)
-        self.connect_btn.style().polish(self.connect_btn)
-        self.record_btn.setEnabled(False)
+        self._repolish(self.connect_btn)
         self.port_box.setEnabled(True)
         self.refresh_btn.setEnabled(True)
         self.heart.set_active(False)
+        self.heart.update()
+
+    def replay_file(self, path: Path) -> None:
+        if self.session.active:
+            self.disconnect_source()
+        try:
+            self._start(ReplaySource(path))
+        except (OSError, ValueError, KeyError) as exc:
+            self._notify(f"Could not open {path.name}: {exc}")
+            return
+        self._go(1)
 
     def _scenario_changed(self) -> None:
         src = self.session.source
@@ -388,98 +413,93 @@ class MainWindow(QMainWindow):
 
     # ---- recording -------------------------------------------------------
 
-    def _recordings_folder(self) -> Path:
+    def recordings_folder(self) -> Path:
         saved = self.settings.value("record_folder")
         return Path(saved) if saved else default_folder()
 
-    def _toggle_recording(self) -> None:
+    def toggle_recording(self) -> None:
+        if not self.session.active:
+            return
         if self.session.recorder is None:
-            path = self.session.start_recording(self._recordings_folder())
-            self.record_btn.setText("Stop recording")
-            self.record_btn.setObjectName("recording")
-            self._rec_timer.start()
-            self.record_info.hide()
+            self.session.start_recording(self.recordings_folder())
+            self._notify("")
         else:
             paths = self.session.stop_recording()
-            self._rec_timer.stop()
-            self.record_btn.setText("Record")
-            self.record_btn.setObjectName("")
             if paths:
-                self.record_info.setText(f"Saved {paths[0].name}. Open folder")
-                self.record_info.setToolTip(str(paths[0].parent))
-                self.record_info.show()
-        self.record_btn.style().unpolish(self.record_btn)
-        self.record_btn.style().polish(self.record_btn)
+                self._notify(f"Saved {paths[0].name}. Click to open the folder.")
+        self._refresh()
 
-    def _update_record_button(self) -> None:
-        rec = self.session.recorder
-        if rec is not None:
-            s = int(rec.duration)
-            self.record_btn.setText(f"Stop  {s // 60:02d}:{s % 60:02d}")
+    def export_buffer(self) -> None:
+        if not self.session.active or self.session.t.size == 0:
+            self._notify("Nothing to export yet. Connect the sensor first.")
+            return
+        folder = self.recordings_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        default = folder / f"pulse_export_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Export the last minute", str(default), "CSV (*.csv)")
+        if path:
+            n = self.session.export_buffer(Path(path))
+            self._notify(f"Exported {n} samples to {Path(path).name}. Click to open the folder.")
 
-    def _open_recordings(self) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._recordings_folder())))
+    def open_recordings(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.recordings_folder())))
+
+    def last_session_text(self) -> str:
+        now = time.monotonic()
+        if now - getattr(self, "_last_check", 0.0) > 5.0:
+            self._last_check = now
+            found = list_sessions(self.recordings_folder())
+            self._last_text = ""
+            if found and found[0].started:
+                self._last_text = "Last session\n" + found[0].started.strftime("%d %b %Y, %H:%M")
+        return getattr(self, "_last_text", "")
 
     # ---- frame and card updates -----------------------------------------
+
+    def _ctx(self) -> Ctx:
+        return Ctx(self.session, THEMES[self._theme], self.session.active, self._head)
 
     def _tick(self) -> None:
         s = self.session
         if not s.active:
             return
         if s.error:
-            self._disconnect()
-            self.record_info.setText(s.error)
-            self.record_info.show()
+            err = s.error
+            self.disconnect_source()
+            self._notify(err)
             return
-        self._pending.extend(s.poll())
-        if s.t.size == 0:
+        new = s.poll()
+        if self.paused or s.t.size == 0:
             return
-        head = self.clock.update(s.latest_t, time.perf_counter())
+        self._pending.extend(new)
+        self._head = self.clock.update(s.latest_t, time.perf_counter())
 
-        usable = s.metrics.bpm is not None
-        while self._pending and self._pending[0].t <= head:
+        steady = s.metrics.bpm is not None
+        while self._pending and self._pending[0].t <= self._head:
             beat = self._pending.pop(0)
-            if usable:
+            if steady and beat.valid:
                 self.heart.pulse()
-        self.heart.set_active(usable)
-        self.heart.update()
-        self.wave.update_view(s.t, s.filtered, s.beats, head)
+        self.heart.set_active(steady)
+        self.pages[self.stack.currentIndex()].draw(self._ctx())
 
-    def _update_cards(self) -> None:
+    def _refresh(self) -> None:
         c = THEMES[self._theme]
         s = self.session
-        m = s.metrics if s.active else None
-        dark = self._theme == "dark"
-        if m is None:
-            self.bpm_label.setText("--")
-            self.status_chip.set_state("Not connected", c["idle"], dark)
-            for card in (self.ibi_card, self.amp_card, self.quality_card):
-                card.set_value("--")
-            self.sdnn.setText("--")
-            self.rmssd.setText("--")
-            self.beats_label.setText("--")
-            self.hrv_hint.setText("Connect the sensor or try the demo.")
-            self.tacho.update_beats([])
-            return
-
-        q = m.quality
-        text, tone = STATE_TEXT[q.state]
-        self.status_chip.set_state(text, c[tone], dark)
-        self.bpm_label.setText("--" if m.bpm is None else f"{m.bpm:.0f}")
-        self.ibi_card.set_value("--" if m.ibi_ms is None else f"{m.ibi_ms:.0f}",
-                                "since the last beat" if m.ibi_ms else "")
-        self.amp_card.set_value("--" if m.amplitude <= 0 else f"{m.amplitude:.1f}",
-                                "filtered, peak to peak" if m.amplitude else "")
-        self.quality_card.set_value(f"{q.score * 100:.0f}", text)
-        h = m.hrv
-        self.sdnn.setText("--" if h is None else f"{h.sdnn_ms:.0f}")
-        self.rmssd.setText("--" if h is None else f"{h.rmssd_ms:.0f}")
-        self.beats_label.setText(str(m.beat_count))
-        self.hrv_hint.setText(
-            "Computed over the last 90 s of valid beats." if h
-            else "Needs about 20 steady beats. Keep the finger still."
-        )
-        self.tacho.update_beats(s.beats)
+        if s.active:
+            kind = {"demo": "Demo running", "sample": "Replaying a recording"}.get(
+                self.port_box.currentData(), "Sensor connected")
+            if isinstance(s.source, ReplaySource) and self.port_box.currentData() not in (DEMO_KEY, SAMPLE_KEY):
+                kind = "Replaying a recording"
+            self.status_line.set(kind, c["good"])
+            desc = re.sub(r"\s*\((COM\d+)\)", r" · \1", getattr(s.source, "description", ""))
+            fw = getattr(s.source, "firmware_version", None)
+            self.device_label.setText(desc + (f"  ·  fw {fw}" if fw and fw not in ("demo", "sample") else ""))
+        else:
+            self.status_line.set("Not connected", c["idle"])
+            self.device_label.setText("")
+        ctx = self._ctx()
+        for page in self.pages:
+            page.refresh(ctx)
 
     def closeEvent(self, event) -> None:
         self.settings.setValue("geometry", self.saveGeometry())

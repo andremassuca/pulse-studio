@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .beats import Beat, BeatTracker
+from .extras import respiration_rate, spectral_bpm
 from .filtering import BandpassFilter
 from .hrv import Hrv, compute_hrv
 from .peaks import PeakDetector
@@ -29,6 +30,8 @@ class Metrics:
     )
     hrv: Hrv | None = None
     beat_count: int = 0
+    bpm_approx: bool = False  # BPM comes from the spectrum, not from single beats
+    resp_rate: float | None = None  # breaths per minute, an estimate
 
 
 @dataclass
@@ -78,7 +81,7 @@ class PulseProcessor:
             return Update(t, raw, raw, [], self.metrics)
         if self._t0 is None:
             self._t0 = float(t[0])
-        if self._last_t is not None and t[0] - self._last_t > GAP_S:
+        if self._last_t is not None and (t[0] - self._last_t > GAP_S or t[0] < self._last_t):
             self._restart_stream()
 
         filtered = self._filter.process(raw)
@@ -141,6 +144,18 @@ class PulseProcessor:
                 bpm = 60000.0 / float(np.mean(last))
                 ibi = self._ibis[-1][1]
 
+        approx = False
+        if bpm is None and usable and quality.periodicity >= 0.3:
+            est = spectral_bpm(np.fromiter(self._filt_tail, float, len(self._filt_tail)), self.fs)
+            if est is not None and est[1] >= 0.35:
+                bpm, approx = est[0], True
+
+        resp = None
+        if usable and bpm is not None and len(self._ibis) >= 25:
+            r = respiration_rate([x[0] for x in self._ibis], [x[1] for x in self._ibis])
+            if r is not None and r[1] >= 0.3:
+                resp = r[0]
+
         hrv = None
         if usable and self._ibis:
             hrv = compute_hrv([x[1] for x in self._ibis], [x[2] for x in self._ibis])
@@ -152,4 +167,6 @@ class PulseProcessor:
             quality=quality,
             hrv=hrv,
             beat_count=self._beat_count,
+            bpm_approx=approx,
+            resp_rate=resp,
         )

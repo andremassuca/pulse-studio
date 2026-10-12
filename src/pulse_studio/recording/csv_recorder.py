@@ -1,6 +1,7 @@
 """Session recording to CSV: raw samples and detected beats."""
 
 import csv
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -86,3 +87,55 @@ class SessionRecorder:
         self._samples_file.close()
         self._beats_file.close()
         return self.samples_path, self.beats_path
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    samples_path: Path
+    started: datetime | None
+    duration_s: float
+    size_bytes: int
+    beats: int
+
+
+def _last_time(path: Path) -> float:
+    """t_s of the last row, read from the end of the file."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 400))
+        lines = f.read().decode("utf-8", errors="ignore").splitlines()
+    for line in reversed(lines):
+        head = line.split(",")[0]
+        try:
+            return float(head)
+        except ValueError:
+            continue
+    return 0.0
+
+
+def list_sessions(folder: Path) -> list[SessionInfo]:
+    """Recordings in a folder, newest first."""
+    found: list[SessionInfo] = []
+    if not folder.exists():
+        return found
+    for path in folder.glob("pulse_*_samples.csv"):
+        stamp = path.name[len("pulse_") : -len("_samples.csv")]
+        try:
+            started = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        except ValueError:
+            started = None
+        beats_file = path.with_name(path.name.replace("_samples.csv", "_beats.csv"))
+        beats = 0
+        if beats_file.exists():
+            with open(beats_file, encoding="utf-8", errors="ignore") as f:
+                beats = max(0, sum(1 for _ in f) - 1)
+        first = 0.0
+        try:
+            with open(path, encoding="utf-8") as f:
+                f.readline()
+                first = float(f.readline().split(",")[0])
+        except (ValueError, OSError):
+            pass
+        found.append(SessionInfo(path, started, max(0.0, _last_time(path) - first), path.stat().st_size, beats))
+    found.sort(key=lambda s: s.started or datetime.min, reverse=True)
+    return found

@@ -1,3 +1,3 @@
-from .csv_recorder import SessionRecorder, default_folder
+from .csv_recorder import SessionInfo, SessionRecorder, default_folder, list_sessions
 
-__all__ = ["SessionRecorder", "default_folder"]
+__all__ = ["SessionInfo", "SessionRecorder", "default_folder", "list_sessions"]

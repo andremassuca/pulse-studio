@@ -132,3 +132,37 @@ def test_gap_in_timestamps_restarts_without_crashing():
     t, v = gen.generate(500)
     proc.process(t + 3.0, v)  # three seconds missing
     assert proc.metrics is not None
+
+
+def test_hrv_extras_are_consistent():
+    ibis = [800 + 40 * ((-1) ** i) for i in range(30)]
+    hrv = compute_hrv(ibis, [False] + [True] * 29)
+    assert hrv is not None
+    assert hrv.pnn50 == pytest.approx(100.0)  # every step is 80 ms
+    assert hrv.sd1_ms == pytest.approx(hrv.rmssd_ms / np.sqrt(2))
+    assert hrv.sd2_ms >= 0
+
+
+def test_spectral_bpm_and_respiration_on_synthetic_data():
+    from pulse_studio.dsp.extras import respiration_rate, spectral_bpm
+
+    t = np.arange(0, 12, 1 / FS)
+    wave = np.sin(2 * np.pi * 1.25 * t) + 0.4 * np.sin(2 * np.pi * 2.5 * t)
+    wave += np.random.default_rng(1).normal(0, 0.5, t.size)
+    bpm, conf = spectral_bpm(wave, FS)
+    assert bpm == pytest.approx(75, abs=2)
+    assert conf > 0.5
+
+    beats = np.cumsum(np.full(60, 0.85))
+    ibis = 850 + 40 * np.sin(2 * np.pi * 0.25 * beats)  # 15 breaths per minute
+    rate, conf = respiration_rate(list(beats), list(ibis))
+    assert rate == pytest.approx(15, abs=1.5)
+    assert conf > 0.5
+
+
+def test_noise_gives_no_confident_spectral_estimate():
+    from pulse_studio.dsp.extras import spectral_bpm
+
+    noise = np.random.default_rng(2).normal(0, 1, int(10 * FS))
+    est = spectral_bpm(noise, FS)
+    assert est is None or est[1] < 0.35
