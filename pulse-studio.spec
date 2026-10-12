@@ -9,6 +9,7 @@ a = Analysis(
     datas=[
         (str(root / "assets" / "icon.ico"), "assets"),
         (str(root / "assets" / "icon.png"), "assets"),
+        (str(root / "docs" / "sample" / "sample_recording.csv"), "sample"),
     ],
     hiddenimports=["serial.tools.list_ports_windows"],
     excludes=[

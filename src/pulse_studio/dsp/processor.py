@@ -15,6 +15,7 @@ FS = 500.0
 HRV_WINDOW_S = 90.0
 BPM_BEATS = 6  # moving average length for the BPM
 STALE_S = 3.0  # no beat for this long: do not show a BPM
+MAX_IBI_SPREAD = 0.20  # recent intervals must agree within this (std / mean)
 GAP_S = 0.05  # a longer hole in the timestamps restarts the filters
 
 
@@ -133,9 +134,12 @@ class PulseProcessor:
         fresh = self._last_valid_beat_t is not None and now - self._last_valid_beat_t <= STALE_S
         usable = quality.state in (SignalState.GOOD, SignalState.POOR)
         if fresh and usable and len(self._ibis) >= 3:
-            last = [x[1] for x in list(self._ibis)[-BPM_BEATS:]]
-            bpm = 60000.0 / float(np.mean(last))
-            ibi = self._ibis[-1][1]
+            last = np.array([x[1] for x in list(self._ibis)[-BPM_BEATS:]])
+            # Scattered intervals mean the detector is following noise: show
+            # nothing rather than a number that looks plausible but is not.
+            if len(last) >= 3 and np.std(last) / np.mean(last) <= MAX_IBI_SPREAD:
+                bpm = 60000.0 / float(np.mean(last))
+                ibi = self._ibis[-1][1]
 
         hrv = None
         if usable and self._ibis:

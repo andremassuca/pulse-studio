@@ -18,7 +18,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..acquisition import SerialSource, SimulatedSource, list_serial_ports, pick_default
+from ..acquisition import (
+    ReplaySource,
+    SerialSource,
+    SimulatedSource,
+    list_serial_ports,
+    pick_default,
+)
+from ..resources import sample_recording
 from ..dsp import SignalState
 from ..recording import default_folder
 from ..session import Session
@@ -28,6 +35,7 @@ from .theme import THEMES, stylesheet
 from .widgets import Card, Chip, StatCard
 
 DEMO_KEY = "demo"
+SAMPLE_KEY = "sample"
 DISPLAY_DELAY_S = 0.28  # must be larger than the peak detection latency
 SCENARIOS = [
     ("Good signal", "finger"),
@@ -312,9 +320,14 @@ class MainWindow(QMainWindow):
         for p in ports:
             self.port_box.addItem(p.label + ("  (Arduino)" if p.is_arduino else ""), p.device)
         self.port_box.addItem("Demo (simulated signal)", DEMO_KEY)
-        choice = pick_default(ports, remembered if remembered != DEMO_KEY else None)
-        if remembered == DEMO_KEY or choice is None:
-            self.port_box.setCurrentIndex(self.port_box.count() - 1)
+        if sample_recording() is not None:
+            self.port_box.addItem("Demo (recorded sample)", SAMPLE_KEY)
+        choice = pick_default(ports, remembered if remembered not in (DEMO_KEY, SAMPLE_KEY) else None)
+        saved_demo = self.port_box.findData(remembered) if remembered in (DEMO_KEY, SAMPLE_KEY) else -1
+        if saved_demo >= 0:
+            self.port_box.setCurrentIndex(saved_demo)
+        elif choice is None:
+            self.port_box.setCurrentIndex(self.port_box.findData(DEMO_KEY))
         else:
             self.port_box.setCurrentIndex(self.port_box.findData(choice.device))
         self.port_box.blockSignals(False)
@@ -332,6 +345,8 @@ class MainWindow(QMainWindow):
             if key == DEMO_KEY:
                 source = SimulatedSource()
                 source.mode = self.scenario.currentData()
+            elif key == SAMPLE_KEY:
+                source = ReplaySource(sample_recording())
             else:
                 source = SerialSource(key, self.port_box.currentText())
             self.session.start(source)
@@ -421,7 +436,7 @@ class MainWindow(QMainWindow):
             return
         head = self.clock.update(s.latest_t, time.perf_counter())
 
-        usable = s.metrics.quality.state in (SignalState.GOOD, SignalState.POOR)
+        usable = s.metrics.bpm is not None
         while self._pending and self._pending[0].t <= head:
             beat = self._pending.pop(0)
             if usable:
