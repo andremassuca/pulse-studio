@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFileDialog,
@@ -30,6 +31,9 @@ from ..acquisition import (
     list_serial_ports,
     pick_default,
 )
+import serial
+
+from ..acquisition.board import send_command
 from ..recording import default_folder, list_sessions
 from ..resources import sample_recording
 from ..session import Session
@@ -150,7 +154,7 @@ class MainWindow(QMainWindow):
         self.notice = QPushButton("")
         self.notice.setObjectName("link")
         self.notice.hide()
-        self.notice.clicked.connect(self.open_recordings)
+        self.notice.clicked.connect(self._notice_clicked)
         content.addWidget(self.notice, 0, Qt.AlignmentFlag.AlignLeft)
         outer.addLayout(content, 1)
 
@@ -346,9 +350,37 @@ class MainWindow(QMainWindow):
         widget.style().unpolish(widget)
         widget.style().polish(widget)
 
-    def _notify(self, text: str) -> None:
+    def _notify(self, text: str, folder: bool = True) -> None:
         self.notice.setText(text)
         self.notice.setVisible(bool(text))
+        self._notice_opens_folder = folder
+
+    def _notice_clicked(self) -> None:
+        if getattr(self, "_notice_opens_folder", True):
+            self.open_recordings()
+
+    def prepare_plotter(self) -> None:
+        """Puts the board in Serial Plotter mode so the Arduino IDE can show it."""
+        key = self.port_box.currentData()
+        if key in (None, DEMO_KEY, SAMPLE_KEY):
+            self._notify("Choose the Arduino port first.", folder=False)
+            return
+        if self.session.active:
+            self.disconnect_source()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            send_command(key, b"P")
+        except (serial.SerialException, OSError) as exc:
+            busy = "Close the Serial Monitor or Plotter and any other program using it."
+            self._notify(f"Could not reach {key}. {busy} ({exc})", folder=False)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._notify(
+            "The board is ready for the Arduino Serial Plotter. In the Arduino IDE open "
+            "Tools, Serial Plotter, at 115200 baud. Connect here again to switch back.",
+            folder=False,
+        )
 
     def toggle_connection(self) -> None:
         if self.session.active:
@@ -379,7 +411,7 @@ class MainWindow(QMainWindow):
 
     def _start(self, source) -> None:
         self.session.start(source)
-        self._notify("")
+        self._notify("", folder=False)
         self.clock.reset()
         self._pending.clear()
         self.paused = False
