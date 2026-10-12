@@ -83,3 +83,17 @@ def test_settings_are_remembered(app, tmp_path):
     assert second._theme == "dark"
     assert second.dashboard.controls.span_buttons[30].isChecked()
     second.close()
+
+
+def test_autoconnect(app, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from pulse_studio.ui.main_window import DEMO_KEY, MainWindow
+
+    win = MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    win.port_box.setCurrentIndex(win.port_box.findData(DEMO_KEY))
+    win.autoconnect()  # setting is off: stays disconnected
+    assert not win.session.active
+    win.autoconnect(force=True)
+    assert win.session.active
+    win.close()

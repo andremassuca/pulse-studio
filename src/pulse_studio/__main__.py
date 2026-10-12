@@ -36,8 +36,7 @@ def main() -> int:
         window.restoreGeometry(geometry)
     window.show()
     splash.finish(window)
-    if "--autoconnect" in sys.argv:
-        window._toggle_connection()
+    window.autoconnect(force="--autoconnect" in sys.argv)
     return app.exec()
 
 

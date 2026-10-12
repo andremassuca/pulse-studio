@@ -369,6 +369,14 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("port", key)
 
+    def autoconnect(self, force: bool = False) -> None:
+        """Connects at start-up: when forced, or when the setting is on and an Arduino is plugged in."""
+        wanted = force or str(self.settings.value("autoconnect", "false")).lower() == "true"
+        if not wanted or self.session.active:
+            return
+        if force or (self._has_arduino and self.port_box.currentData() not in (DEMO_KEY, SAMPLE_KEY)):
+            self.toggle_connection()
+
     def _start(self, source) -> None:
         self.session.start(source)
         self._notify("")
