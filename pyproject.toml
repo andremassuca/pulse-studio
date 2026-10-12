@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pulse-studio"
+version = "0.1.0"
+description = "Desktop app for the XD-58C pulse sensor and Arduino Uno"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6", "pillow>=10"]
+
+[project.gui-scripts]
+pulse-studio = "pulse_studio.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pulse_studio = ["data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
