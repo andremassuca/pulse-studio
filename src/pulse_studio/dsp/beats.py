@@ -33,11 +33,13 @@ class BeatTracker:
         self._last: Beat | None = None
         self._recent: deque[float] = deque(maxlen=8)
         self._outliers_in_a_row = 0
+        self._boot_prev: float | None = None
 
     def reset(self) -> None:
         self._last = None
         self._recent.clear()
         self._outliers_in_a_row = 0
+        self._boot_prev = None
 
     @property
     def last_beat(self) -> Beat | None:
@@ -59,13 +61,23 @@ class BeatTracker:
         if dt > MAX_IBI_S:
             self._recent.clear()
             self._outliers_in_a_row = 0
+            self._boot_prev = None
             self._last = Beat(peak.t, peak.height, None, False)
             return self._last
 
-        valid = True
-        if len(self._recent) >= 3:
-            ref = median(self._recent)
-            valid = abs(dt - ref) <= MAX_DEVIATION * ref
+        if len(self._recent) < 3:
+            # No history yet: trust an interval only when it agrees with the
+            # one before it.
+            prev = self._boot_prev
+            self._boot_prev = dt
+            valid = prev is not None and abs(dt - prev) <= MAX_DEVIATION * prev
+            if valid:
+                self._recent.append(dt)
+            self._last = Beat(peak.t, peak.height, dt * 1000.0, valid)
+            return self._last
+
+        ref = median(self._recent)
+        valid = abs(dt - ref) <= MAX_DEVIATION * ref
         if valid:
             self._recent.append(dt)
             self._outliers_in_a_row = 0

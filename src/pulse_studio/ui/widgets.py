@@ -51,7 +51,8 @@ class Chip(QLabel):
 
     def set_state(self, text: str, color: str, dark: bool) -> None:
         self.setText(text)
-        bg = f"{color}33" if dark else f"{color}22"
+        r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
+        bg = f"rgba({r}, {g}, {b}, {0.20 if dark else 0.14})"
         self.setStyleSheet(f"QLabel#chip {{ color: {color}; background: {bg}; }}")
 
 

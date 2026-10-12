@@ -15,6 +15,28 @@ class Hrv:
     count: int
 
 
+def correct_artifacts(ibis_ms: list[float], consecutive: list[bool], tolerance: float = 0.25):
+    """Drops intervals that stray from the local median (usual HRV practice).
+
+    A dropped interval also breaks the chain, so RMSSD never subtracts across
+    the gap.
+    """
+    n = len(ibis_ms)
+    keep_ibi: list[float] = []
+    keep_cons: list[bool] = []
+    broken = False
+    for i in range(n):
+        lo, hi = max(0, i - 3), min(n, i + 4)
+        local = float(np.median(ibis_ms[lo:hi]))
+        if abs(ibis_ms[i] - local) > tolerance * local:
+            broken = True
+            continue
+        keep_ibi.append(ibis_ms[i])
+        keep_cons.append(consecutive[i] and not broken and bool(keep_ibi[:-1]))
+        broken = False
+    return keep_ibi, keep_cons
+
+
 def compute_hrv(
     ibis_ms: list[float], consecutive: list[bool], min_intervals: int = MIN_INTERVALS
 ) -> Hrv | None:
@@ -24,6 +46,7 @@ def compute_hrv(
     RMSSD never uses a difference that spans a rejected beat. Returns None
     when there are not enough intervals for the numbers to mean anything.
     """
+    ibis_ms, consecutive = correct_artifacts(ibis_ms, consecutive)
     if len(ibis_ms) < min_intervals:
         return None
     ibi = np.asarray(ibis_ms, dtype=float)
