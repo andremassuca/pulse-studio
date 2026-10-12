@@ -11,6 +11,7 @@ __pycache__/
 # Local caches
 .pip-cache/
 .tmp/
+.captures/
 
 # Builds and executables
 build/
