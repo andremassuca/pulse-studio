@@ -1,6 +1,7 @@
 """Reads the Arduino stream on a background thread."""
 
 import threading
+import time
 from collections import deque
 
 import serial
@@ -59,9 +60,17 @@ class SerialSource:
     def _run(self, ser: serial.Serial) -> None:
         parser = LineParser()
         buffer = b""
+        got_samples = False
+        # The Uno resets when the port opens. Once it is up, ask for the
+        # compact format, in case it was left in Serial Plotter mode. Keep
+        # asking until samples arrive.
+        next_ask = time.monotonic() + 1.8
         try:
             ser.reset_input_buffer()
             while not self._stop.is_set():
+                if not got_samples and time.monotonic() >= next_ask:
+                    ser.write(b"C")
+                    next_ask += 1.0
                 chunk = ser.read(max(1, ser.in_waiting))
                 if not chunk:
                     continue
@@ -74,6 +83,7 @@ class SerialSource:
                         batch.append(sample)
                 self.firmware_version = parser.firmware_version
                 if batch:
+                    got_samples = True
                     with self._lock:
                         self._samples.extend(batch)
         except (serial.SerialException, OSError) as exc:

@@ -26,7 +26,7 @@ class PeakDetector:
     def __init__(
         self,
         fs: float,
-        window_s: float = 0.10,
+        window_s: float = 0.12,
         amplitude_window_s: float = 4.0,
         rel_threshold: float = 0.4,
         min_height: float = 0.5,

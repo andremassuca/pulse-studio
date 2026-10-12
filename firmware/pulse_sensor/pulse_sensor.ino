@@ -21,17 +21,20 @@
 // (filtering, peak detection, HRV, quality) is done in the desktop app.
 //
 // Serial commands (one character):
+//   C  compact format for the desktop app (the default)
+//   P  Serial Plotter format: "Signal:<counts>,Beat:<0|4>", where Signal is
+//      the pulse wave with the baseline removed. The choice is stored in
+//      EEPROM, so it survives the reset that opening the port causes. Send P
+//      once from the Serial Monitor, close it, then open the Serial Plotter.
+//      The desktop app sends C by itself when it connects.
 //   V  print the banner again
 //
 // Close the Serial Monitor/Plotter before opening the desktop app: the COM
 // port can only have one owner.
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.2.0"
 
-// Set to 1 to print "Signal:<counts>,Beat:<0|4>" for the Arduino Serial
-// Plotter instead of the compact format. The desktop app needs the compact
-// format, so leave it at 0 for normal use.
-#define PLOTTER_MODE 0
+#include <EEPROM.h>
 
 const uint8_t PIN_SENSOR = A0;
 const uint8_t PIN_LED = 13;
@@ -43,15 +46,17 @@ const uint32_t STATS_EVERY_MS = 10000;
 const uint8_t OVERSAMPLE = 16;
 
 // Beat detector, working directly on the 16x oversampled value.
-const uint8_t SMOOTH_SHIFT = 2;           // ~8 ms smoothing
-const uint8_t BASELINE_SHIFT = 9;         // ~1 s baseline
+const uint8_t SMOOTH_SHIFT = 3;           // ~16 ms smoothing
+const uint8_t BASELINE_SHIFT = 8;         // ~0.5 s baseline
 const uint8_t BASELINE_SHIFT_WARMUP = 5;  // fast baseline while starting up
 const uint8_t ENVELOPE_DECAY_SHIFT = 11;  // ~4 s amplitude memory
 const int32_t ENVELOPE_CLAMP = 16L * 40;  // artifacts cannot dominate it
 const int32_t MIN_ENVELOPE = 24;          // 1.5 ADC counts: below it, no pulse
-const uint16_t REFRACTORY_MS = 300;
+const uint16_t REFRACTORY_MS = 400;
 const uint16_t WARMUP_MS = 1500;
 const uint16_t LED_ON_MS = 60;
+const int EEPROM_MODE_ADDR = 0;
+const uint8_t MODE_PLOTTER = 'P';
 
 uint32_t startUs;
 uint32_t nextUs;
@@ -66,6 +71,8 @@ int32_t prevX16;
 uint32_t lastBeatMs;
 uint32_t ledOffMs;
 uint32_t warmupEndMs;
+int32_t lastX16 = 0;
+bool plotterMode = false;
 
 void printBanner() {
   Serial.print(F("# pulse_sensor fw="));
@@ -97,7 +104,7 @@ bool detectBeat(int32_t raw16, uint32_t nowMs) {
 
   bool beat = false;
   if (nowMs >= warmupEndMs && envelope16 > MIN_ENVELOPE) {
-    int32_t threshold16 = (envelope16 * 9) >> 4;  // 56% of the recent peak
+    int32_t threshold16 = envelope16 >> 1;  // 50% of the recent peak
     if (prevX16 < threshold16 && x16 >= threshold16 &&
         nowMs - lastBeatMs > REFRACTORY_MS) {
       beat = true;
@@ -105,6 +112,7 @@ bool detectBeat(int32_t raw16, uint32_t nowMs) {
     }
   }
   prevX16 = x16;
+  lastX16 = x16;
   return beat;
 }
 
@@ -112,6 +120,7 @@ void setup() {
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
   Serial.begin(BAUD);
+  plotterMode = (EEPROM.read(EEPROM_MODE_ADDR) == MODE_PLOTTER);
 
   // ADC clock 250 kHz (prescaler 64): 16 readings take about 0.8 ms.
   ADCSRA = (ADCSRA & ~0x07) | 0x06;
@@ -128,7 +137,7 @@ void setup() {
   lastBeatMs = 0;
   ledOffMs = 0;
 
-  printBanner();
+  if (!plotterMode) printBanner();
 
   uint32_t nowMs = millis();
   warmupEndMs = nowMs + WARMUP_MS;
@@ -160,18 +169,18 @@ void loop() {
     // Never block on a full serial buffer: drop the line and count it. The
     // gap is visible in the timestamps.
     if (Serial.availableForWrite() >= 26) {
-#if PLOTTER_MODE
-      Serial.print(F("Signal:"));
-      Serial.print(raw16 / 16.0, 2);
-      Serial.print(F(",Beat:"));
-      Serial.println(beat ? 4 : 0);
-#else
-      Serial.print(stampUs);
-      Serial.print(',');
-      Serial.print(raw16);
-      if (beat) Serial.print(F(",1"));
-      Serial.println();
-#endif
+      if (plotterMode) {
+        Serial.print(F("Signal:"));
+        Serial.print(lastX16 / 16.0, 2);
+        Serial.print(F(",Beat:"));
+        Serial.println(beat ? 4 : 0);
+      } else {
+        Serial.print(stampUs);
+        Serial.print(',');
+        Serial.print(raw16);
+        if (beat) Serial.print(F(",1"));
+        Serial.println();
+      }
     } else {
       drops++;
     }
@@ -185,18 +194,25 @@ void loop() {
 
   if (nowMs - lastStatsMs >= STATS_EVERY_MS) {
     lastStatsMs = nowMs;
-#if !PLOTTER_MODE
-    if (Serial.availableForWrite() >= 40) {
+    if (!plotterMode && Serial.availableForWrite() >= 40) {
       Serial.print(F("# stats drops="));
       Serial.print(drops);
       Serial.print(F(" resyncs="));
       Serial.println(resyncs);
     }
-#endif
   }
 
   if (Serial.available() > 0) {
     char c = Serial.read();
     if (c == 'V' || c == 'v') printBanner();
+    if (c == 'P' || c == 'p') {
+      EEPROM.update(EEPROM_MODE_ADDR, MODE_PLOTTER);
+      plotterMode = true;
+    }
+    if (c == 'C' || c == 'c') {
+      EEPROM.update(EEPROM_MODE_ADDR, 'C');
+      plotterMode = false;
+      printBanner();
+    }
   }
 }

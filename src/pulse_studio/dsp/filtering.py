@@ -7,12 +7,13 @@ from scipy.signal import butter, sosfilt, sosfilt_zi
 class BandpassFilter:
     """Causal Butterworth band-pass that keeps its state between chunks.
 
-    The pulse of a resting adult sits between roughly 0.7 and 3 Hz, so the
-    default 0.5-5 Hz band removes the slow baseline drift and most of the
-    high frequency noise while keeping the shape of each beat.
+    The pulse sits between roughly 0.7 and 3 Hz (40-180 BPM). The default
+    0.6-3.5 Hz band removes the slow baseline drift and the noise above the
+    pulse. It was chosen on real recordings: a wider upper edge (5 Hz) let
+    through sub-peaks that produced extra, shorter intervals.
     """
 
-    def __init__(self, fs: float, low: float = 0.5, high: float = 5.0, order: int = 2):
+    def __init__(self, fs: float, low: float = 0.6, high: float = 3.5, order: int = 2):
         self._sos = butter(order, [low, high], btype="band", fs=fs, output="sos")
         self._zi_unit = sosfilt_zi(self._sos)
         self._zi: np.ndarray | None = None
