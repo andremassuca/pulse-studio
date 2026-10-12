@@ -50,6 +50,7 @@ class WavePlot(pg.PlotWidget):
         self.span = 10.0
         self.mode = "sweep"
         self._half = 3.0
+        self._snap = True  # fit the vertical scale at once on the first data
         self._c = None
         item = self.getPlotItem()
         item.layout.setContentsMargins(6, 8, 10, 4)
@@ -117,6 +118,7 @@ class WavePlot(pg.PlotWidget):
         return x[::step], y[::step]
 
     def clear_view(self) -> None:
+        self._snap = True
         for curve in (*self._cur, self._prev):
             curve.setData([], [])
         for it in (self._peaks, self._rejected, self._halo, self._head, self._peak_halo):
@@ -142,7 +144,12 @@ class WavePlot(pg.PlotWidget):
         values = np.concatenate(parts) if parts else np.empty(0)
         if values.size > 50:
             level = float(np.percentile(np.abs(values), 99))
-            self._half += 0.08 * (max(2.2, level * 1.35) - self._half)
+            target = max(1.2, level * 1.35)
+            if self._snap and values.size > 250:
+                self._half, self._snap = target, False
+            else:
+                # Grow fast when the trace would be clipped, shrink gently.
+                self._half += (0.35 if target > self._half else 0.06) * (target - self._half)
         step = _nice_step(2 * self._half)
         self.getAxis("left").setTickSpacing(step, step / 5)
         self.setYRange(-self._half, self._half, padding=0)
