@@ -1,0 +1,29 @@
+# Python environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local caches
+.pip-cache/
+.tmp/
+
+# Builds and executables
+build/
+dist/
+*.exe
+
+# Recordings (personal data), except the sample in docs/sample
+*.csv
+!docs/sample/
+!docs/sample/*.csv
+
+# Editors and system files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
